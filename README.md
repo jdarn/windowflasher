@@ -22,13 +22,20 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 ## Required system tools
 
-`lsblk mount umount wipefs parted mkfs.vfat mkfs.ntfs rsync` (packages: util-linux, parted,
-dosfstools, ntfs-3g, rsync). The binary checks for them at startup and tells you what is missing.
+`lsblk findmnt mount umount wipefs parted mkfs.vfat mkfs.ntfs rsync sha256sum` (packages:
+util-linux, parted, dosfstools, ntfs-3g, rsync, coreutils). The binary checks for them at startup and tells you what is missing.
 NTFS is mounted with the kernel `ntfs3` driver, falling back to `ntfs-3g`.
 
 ## Notes
 
-- Both partitions get the GPT `msftdata` flag.
+- Both partitions get the GPT `msftdata` flag. The drive is GPT-only, so it boots in UEFI mode
+  (which Windows 11 requires anyway).
+- Before the confirm screen, the drive size is checked against the ISO (1 GiB BOOT + ISO contents
+  + headroom), and the ISO's boot files are checked to fit on BOOT, so nothing is wiped for a
+  drive that is too small.
+- After copying, `boot.wim` and `install.wim`/`install.esd` are verified with sha256 against the
+  ISO. This takes a few minutes on slow drives.
+- Partitions grabbed by a desktop automounter are unmounted again before copying and at the end.
 - **Flash-drive detection** is a heuristic: whole disk, `TRAN=usb`, removable (`RM=1`),
   not read-only, size > 0, and no `ssd`/`hdd`/`nvme` in the model string. USB SSDs and HDDs normally
   report as non-removable, which is what separates them. `ROTA` is ignored because many flash
