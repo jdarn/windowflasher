@@ -1,0 +1,18 @@
+[package]
+name = "windowflasher"
+version = "0.1.0"
+edition = "2021"
+description = "TUI that builds a bootable Windows 11 installer USB from a Linux host"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+ratatui = "0.29"
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
