@@ -3,10 +3,11 @@
 use crate::devices::{self, Device};
 use crate::installer::{self, Job, Msg};
 use crate::sys::{self, MountSet};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -53,6 +54,24 @@ enum Action {
     AskConfirm(Device),
     Back,
     Start(Device),
+}
+
+/// True if the image has a UDF filesystem. Every Windows installer ISO does; most Linux
+/// ISOs are plain ISO 9660 and don't. Looks for the UDF "NSR02"/"NSR03" descriptor in the
+/// volume recognition area, which starts at byte 32768 (sector 16, 2048-byte sectors).
+fn has_udf(iso: &Path) -> Result<bool> {
+    const START: usize = 16 * 2048;
+    const SECTORS: usize = 32;
+    let mut buf = Vec::with_capacity(START + SECTORS * 2048);
+    File::open(iso)
+        .with_context(|| format!("could not open {}", iso.display()))?
+        .take((START + SECTORS * 2048) as u64)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("could not read {}", iso.display()))?;
+    Ok((0..SECTORS).any(|i| {
+        let off = START + i * 2048;
+        matches!(buf.get(off + 1..off + 6), Some(b"NSR02") | Some(b"NSR03"))
+    }))
 }
 
 fn move_sel(state: &mut ListState, len: usize, delta: i32) {
@@ -133,6 +152,14 @@ impl App {
 
     fn try_mount_iso(&mut self, iso: &Path, target: &Path) -> Result<()> {
         // Windows ISOs contain a stub ISO 9660 view; the real files are in UDF.
+        // Check for UDF first so a Linux (or other non-Windows) ISO gets a clear message
+        // instead of a raw mount error.
+        if !has_udf(iso)? {
+            bail!(
+                "this isn't a Windows 11 installer ISO. windowflasher only makes Windows 11 \
+                 install USBs. For a Linux ISO, use Fedora Media Writer or write it with dd."
+            );
+        }
         self.iso_mounts.mount(iso, target, "udf", "loop,ro")?;
         let sources = sys::find_ci(target, "sources").ok_or_else(|| {
             anyhow!("no sources folder: this doesn't look like a Windows installer ISO")
