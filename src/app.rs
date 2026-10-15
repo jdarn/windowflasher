@@ -39,6 +39,8 @@ pub struct App {
     pub show_all: bool,
     iso_mounts: MountSet,
     iso_dir: PathBuf,
+    /// Total size of the mounted ISO's files (0 when no ISO is mounted).
+    iso_bytes: u64,
 }
 
 enum Action {
@@ -73,6 +75,7 @@ impl App {
             show_all: false,
             iso_mounts: MountSet::new(),
             iso_dir,
+            iso_bytes: 0,
         };
         app.scan_isos();
         Ok(app)
@@ -113,6 +116,7 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.iso_mounts.unmount_all();
+        self.iso_bytes = 0;
         let target = self.iso_dir.clone();
         match self.try_mount_iso(&iso, &target) {
             Ok(()) => {
@@ -141,6 +145,24 @@ impl App {
         {
             bail!("sources/install.wim (or install.esd) is missing");
         }
+
+        // BOOT gets everything except sources/, plus sources/boot.wim. Make sure it fits
+        // before anything is wiped.
+        let boot_bytes: u64 = fs::read_dir(target)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p != &sources)
+            .map(|p| sys::dir_size(&p))
+            .sum::<u64>()
+            + sys::find_ci(&sources, "boot.wim").map_or(0, |p| sys::dir_size(&p));
+        if boot_bytes > installer::boot_capacity_bytes() {
+            bail!(
+                "boot files need {} but the BOOT partition holds about {}",
+                devices::human_size(boot_bytes),
+                devices::human_size(installer::boot_capacity_bytes())
+            );
+        }
+        self.iso_bytes = sys::dir_size(target);
         Ok(())
     }
 
@@ -291,7 +313,19 @@ impl App {
                 self.to_devices(None);
             }
             Action::RescanDevices | Action::Back => self.to_devices(None),
-            Action::AskConfirm(d) => self.screen = Screen::Confirm { device: d, yes: false },
+            Action::AskConfirm(d) => {
+                let need = installer::required_drive_bytes(self.iso_bytes);
+                if d.size < need {
+                    self.to_devices(Some(format!(
+                        "{} ({}) is too small: this ISO needs at least {}.",
+                        d.path,
+                        devices::human_size(d.size),
+                        devices::human_size(need)
+                    )));
+                } else {
+                    self.screen = Screen::Confirm { device: d, yes: false };
+                }
+            }
             Action::Start(d) => self.start(d),
         }
     }

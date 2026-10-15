@@ -12,14 +12,30 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
 
-pub const STAGES: [&str; 6] = [
+pub const STAGES: [&str; 7] = [
     "Partition drive (GPT)",
     "Format BOOT (FAT32) and INSTALL (NTFS)",
     "Copy boot files to BOOT",
     "Copy boot.wim to BOOT",
     "Copy Windows files to INSTALL",
-    "Flush, sync and unmount",
+    "Flush and verify (sha256)",
+    "Unmount",
 ];
+
+/// Size of the FAT32 BOOT partition, in MiB. INSTALL starts right after it.
+pub const BOOT_MIB: u64 = 1024;
+const MIB: u64 = 1024 * 1024;
+
+/// Bytes the drive needs: 1 MiB alignment gap, BOOT, the ISO contents on NTFS,
+/// plus headroom for NTFS metadata and the GPT backup header.
+pub fn required_drive_bytes(iso_bytes: u64) -> u64 {
+    (1 + BOOT_MIB) * MIB + iso_bytes + iso_bytes / 50 + 64 * MIB
+}
+
+/// Usable space on BOOT for files, leaving room for FAT32 tables and cluster slack.
+pub fn boot_capacity_bytes() -> u64 {
+    (BOOT_MIB - 24) * MIB
+}
 
 pub enum Msg {
     Stage(usize),
@@ -76,13 +92,17 @@ fn steps(job: &Job, tx: &Sender<Msg>, mounts: &mut MountSet) -> Result<()> {
     unmount_device(dev, tx)?;
     log(tx, format!("Wiping old signatures on {dev}"));
     sys::run("wipefs", ["-a", dev])?;
-    log(tx, "Creating GPT with BOOT (1 GiB, FAT32) and INSTALL (rest, NTFS)");
+    let boot_end = format!("{}MiB", 1 + BOOT_MIB);
+    log(
+        tx,
+        format!("Creating GPT with BOOT ({BOOT_MIB} MiB, FAT32) and INSTALL (rest, NTFS)"),
+    );
     sys::run(
         "parted",
         [
             "-s", "-a", "optimal", dev, "mklabel", "gpt", "mkpart", "BOOT", "fat32", "1MiB",
-            "1025MiB", "mkpart", "INSTALL", "ntfs", "1025MiB", "100%", "set", "1", "msftdata",
-            "on", "set", "2", "msftdata", "on",
+            boot_end.as_str(), "mkpart", "INSTALL", "ntfs", boot_end.as_str(), "100%", "set", "1",
+            "msftdata", "on", "set", "2", "msftdata", "on",
         ],
     )?;
     settle(dev, &[p1.as_str(), p2.as_str()])?;
@@ -99,6 +119,9 @@ fn steps(job: &Job, tx: &Sender<Msg>, mounts: &mut MountSet) -> Result<()> {
 
     // 3. Copy everything except sources/ to the FAT32 partition
     stage(tx, 2);
+    // The automounter may have grabbed the freshly formatted partitions.
+    let _ = sys::run("udevadm", ["settle"]);
+    unmount_device(dev, tx)?;
     mounts.mount(&p1, &vfat, "vfat", "rw")?;
     run_rsync(
         tx,
@@ -139,20 +162,23 @@ fn steps(job: &Job, tx: &Sender<Msg>, mounts: &mut MountSet) -> Result<()> {
         ],
     )?;
 
-    // 6. Sync + unmount
+    // 6. Sync + verify what actually landed on the drive
     stage(tx, 5);
     let _ = tx.send(Msg::Status("Flushing data to the drive; this can take a while...".into()));
     unsafe { libc::sync() };
     log(tx, "Filesystems synced");
-    //verify what actually landed on the drive ---
     // Drop the page cache so the hashes read from the USB drive, not from RAM.
     let _ = fs::write("/proc/sys/vm/drop_caches", "3");
     verify_copy(tx, &job.iso_dir, &vfat, &ntfs)?;
-    //unmount all mounts
+
+    // 7. Unmount ours, then anything a desktop automounter added meanwhile
+    stage(tx, 6);
     let errs = mounts.unmount_all();
     if !errs.is_empty() {
         bail!("could not unmount cleanly: {}", errs.join("; "));
     }
+    unmount_device(dev, tx)?;
+    unsafe { libc::sync() };
     log(tx, "BOOT and INSTALL unmounted");
     let _ = tx.send(Msg::Progress(1.0));
     Ok(())

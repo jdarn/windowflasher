@@ -49,6 +49,8 @@ pub fn missing_tools() -> Vec<String> {
         (&["mkfs.vfat"], "dosfstools"),
         (&["mkfs.ntfs", "mkntfs"], "ntfs-3g (provides mkfs.ntfs)"),
         (&["rsync"], "rsync"),
+        (&["findmnt"], "util-linux"),
+        (&["sha256sum"], "coreutils"),
     ];
     reqs.iter()
         .filter(|(names, _)| !names.iter().any(|n| which(n).is_some()))
@@ -121,6 +123,22 @@ pub fn umount<P: AsRef<OsStr>>(target: P) -> Result<()> {
         }
     }
     Err(last.unwrap_or_else(|| anyhow!("umount failed")))
+}
+
+/// Total size in bytes of all regular files under `path` (does not follow symlinks).
+pub fn dir_size(path: &Path) -> u64 {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    fs::read_dir(path)
+        .map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum())
+        .unwrap_or(0)
 }
 
 /// Case-insensitive lookup of a directory entry (UDF/ISO9660 are case-sensitive on Linux).
