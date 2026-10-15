@@ -126,19 +126,22 @@ pub fn umount<P: AsRef<OsStr>>(target: P) -> Result<()> {
 }
 
 /// Total size in bytes of all regular files under `path` (does not follow symlinks).
-pub fn dir_size(path: &Path) -> u64 {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return 0;
-    };
+/// Any unreadable file or directory is an error, so a size is never underestimated.
+pub fn dir_size(path: &Path) -> Result<u64> {
+    let meta = fs::symlink_metadata(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
     if meta.is_file() {
-        return meta.len();
+        return Ok(meta.len());
     }
     if !meta.is_dir() {
-        return 0;
+        return Ok(0);
     }
-    fs::read_dir(path)
-        .map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum())
-        .unwrap_or(0)
+    let mut total = 0;
+    for entry in fs::read_dir(path).with_context(|| format!("could not list {}", path.display()))? {
+        let entry = entry.with_context(|| format!("could not list {}", path.display()))?;
+        total += dir_size(&entry.path())?;
+    }
+    Ok(total)
 }
 
 /// Case-insensitive lookup of a directory entry (UDF/ISO9660 are case-sensitive on Linux).

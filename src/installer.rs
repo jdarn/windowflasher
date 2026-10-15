@@ -119,6 +119,14 @@ fn steps(job: &Job, tx: &Sender<Msg>, mounts: &mut MountSet) -> Result<()> {
 
     // 3. Copy everything except sources/ to the FAT32 partition
     stage(tx, 2);
+    // Exclude the sources folder by its real name on the ISO (the size check uses the same one).
+    let src_sources = sys::find_ci(&job.iso_dir, "sources")
+        .ok_or_else(|| anyhow!("ISO has no sources directory"))?;
+    let sources_name = src_sources
+        .file_name()
+        .ok_or_else(|| anyhow!("ISO sources directory has no name"))?
+        .to_string_lossy()
+        .into_owned();
     // The automounter may have grabbed the freshly formatted partitions.
     let _ = sys::run("udevadm", ["settle"]);
     unmount_device(dev, tx)?;
@@ -130,7 +138,7 @@ fn steps(job: &Job, tx: &Sender<Msg>, mounts: &mut MountSet) -> Result<()> {
             "--info=progress2".into(),
             "--no-inc-recursive".into(),
             "--exclude".into(),
-            "/sources".into(),
+            format!("/{sources_name}"),
             "--delete-before".into(),
             iso.clone(),
             format!("{}/", vfat.display()),
@@ -139,8 +147,6 @@ fn steps(job: &Job, tx: &Sender<Msg>, mounts: &mut MountSet) -> Result<()> {
 
     // 4. boot.wim only
     stage(tx, 3);
-    let src_sources = sys::find_ci(&job.iso_dir, "sources")
-        .ok_or_else(|| anyhow!("ISO has no sources directory"))?;
     let boot_wim = sys::find_ci(&src_sources, "boot.wim")
         .ok_or_else(|| anyhow!("ISO has no sources/boot.wim"))?;
     let dst_sources = vfat.join("sources");

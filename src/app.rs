@@ -148,13 +148,17 @@ impl App {
 
         // BOOT gets everything except sources/, plus sources/boot.wim. Make sure it fits
         // before anything is wiped.
-        let boot_bytes: u64 = fs::read_dir(target)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p != &sources)
-            .map(|p| sys::dir_size(&p))
-            .sum::<u64>()
-            + sys::find_ci(&sources, "boot.wim").map_or(0, |p| sys::dir_size(&p));
+        // Any read error stops here, so a size is never underestimated.
+        let mut boot_bytes: u64 = 0;
+        for entry in fs::read_dir(target)? {
+            let p = entry?.path();
+            if p != sources {
+                boot_bytes += sys::dir_size(&p)?;
+            }
+        }
+        if let Some(wim) = sys::find_ci(&sources, "boot.wim") {
+            boot_bytes += sys::dir_size(&wim)?;
+        }
         if boot_bytes > installer::boot_capacity_bytes() {
             bail!(
                 "boot files need {} but the BOOT partition holds about {}",
@@ -162,7 +166,7 @@ impl App {
                 devices::human_size(installer::boot_capacity_bytes())
             );
         }
-        self.iso_bytes = sys::dir_size(target);
+        self.iso_bytes = sys::dir_size(target)?;
         Ok(())
     }
 
